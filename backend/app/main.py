@@ -1,18 +1,21 @@
 """
 Pulse Backend — Точка входа FastAPI приложения.
 
-Настраивает приложение, middleware, роутеры и SQLite WAL режим при старте.
+Настраивает приложение, middleware, роутеры, rate limiting,
+security headers и SQLite WAL режим при старте.
 """
 from __future__ import annotations
 
-import logging
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Callable
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from sqlalchemy import event, text
 
 from app.core.config import settings
@@ -21,7 +24,7 @@ from app.core.exceptions import register_exception_handlers
 from app.models.base import Base
 
 # ──────────────────────────────────────────────
-# Настройка структурированного логирования
+# Структурированное логирование
 # ──────────────────────────────────────────────
 structlog.configure(
     processors=[
@@ -34,78 +37,74 @@ structlog.configure(
 
 logger = structlog.get_logger(__name__)
 
+# ──────────────────────────────────────────────
+# Rate Limiter (slowapi)
+# ──────────────────────────────────────────────
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=[f"{settings.RATE_LIMIT_PER_MINUTE}/minute"],
+)
+
 
 # ──────────────────────────────────────────────
-# SQLite PRAGMA — устанавливается при каждом подключении
+# SQLite PRAGMA — каждое подключение
 # ──────────────────────────────────────────────
 @event.listens_for(engine.sync_engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):  # type: ignore[no-untyped-def]
     """Настраивает SQLite PRAGMA для максимальной производительности.
 
-    Вызывается автоматически при каждом новом подключении к БД.
     WAL-режим критически важен для конкурентного чтения при аналитических запросах.
     busy_timeout предотвращает SQLITE_BUSY при параллельных запросах.
     """
     cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")        # Журнал записи вперёд
-    cursor.execute("PRAGMA synchronous=NORMAL")       # Баланс скорости и надёжности
-    cursor.execute("PRAGMA cache_size=-65536")        # 64 МБ кеша страниц
-    cursor.execute("PRAGMA foreign_keys=ON")          # Проверка внешних ключей
-    cursor.execute("PRAGMA busy_timeout=5000")        # 5 сек ожидание при блокировке
-    cursor.execute("PRAGMA mmap_size=268435456")      # 256 МБ memory-mapped I/O
-    cursor.execute("PRAGMA temp_store=MEMORY")        # Временные таблицы в RAM
-    cursor.execute("PRAGMA auto_vacuum=INCREMENTAL")  # Постепенная дефрагментация
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA cache_size=-65536")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA mmap_size=268435456")
+    cursor.execute("PRAGMA temp_store=MEMORY")
+    cursor.execute("PRAGMA auto_vacuum=INCREMENTAL")
     cursor.close()
 
 
 # ──────────────────────────────────────────────
-# Lifespan — старт и остановка приложения
+# Lifespan — запуск и остановка
 # ──────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Управляет жизненным циклом FastAPI приложения.
+    """Управляет жизненным циклом FastAPI.
 
-    При старте:
-    - Создаёт таблицы БД (если не существуют)
-    - Верифицирует WAL-режим
-    - Логирует конфигурацию
-
-    При остановке:
-    - Корректно закрывает пул соединений
+    Startup: создаёт таблицы, верифицирует WAL, запускает APScheduler.
+    Shutdown: останавливает планировщик, закрывает пул соединений.
     """
     # ── STARTUP ──
-    logger.info(
-        "Запуск Pulse Backend",
-        version="1.1.0",
-        environment=settings.ENVIRONMENT,
-        database_url=settings.DATABASE_URL,
-    )
+    logger.info("Запуск Pulse Backend", version="1.1.0", environment=settings.ENVIRONMENT)
 
-    # Создание схемы БД
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # Верификация WAL-режима
     async with async_session_factory() as session:
         result = await session.execute(text("PRAGMA journal_mode"))
         journal_mode = result.scalar()
-        logger.info("Режим журнала SQLite", journal_mode=journal_mode)
+        logger.info("SQLite journal_mode", mode=journal_mode)
 
-        if journal_mode != "wal":
-            logger.warning("WAL-режим не активен! Производительность может снизиться.")
+    # APScheduler — фоновые задачи синхронизации
+    from app.services.scheduler import start_scheduler
+    start_scheduler()
 
-    logger.info("Pulse Backend запущен успешно ✓")
-
-    yield  # Приложение работает
+    logger.info("Pulse Backend запущен ✓")
+    yield
 
     # ── SHUTDOWN ──
-    logger.info("Остановка Pulse Backend...")
+    from app.services.scheduler import stop_scheduler
+    stop_scheduler()
     await engine.dispose()
-    logger.info("Соединения с БД закрыты ✓")
+    logger.info("Pulse Backend остановлен ✓")
 
 
 # ──────────────────────────────────────────────
-# Создание FastAPI приложения
+# FastAPI App
 # ──────────────────────────────────────────────
 app = FastAPI(
     title="Pulse Analytics API",
@@ -118,9 +117,44 @@ app = FastAPI(
 )
 
 # ──────────────────────────────────────────────
-# Обработчики ошибок
+# Rate Limiting
+# ──────────────────────────────────────────────
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# ──────────────────────────────────────────────
+# Exception Handlers
 # ──────────────────────────────────────────────
 register_exception_handlers(app)
+
+# ──────────────────────────────────────────────
+# Security Headers Middleware
+# ──────────────────────────────────────────────
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next: Callable) -> Response:
+    """Добавляет HTTP security headers к каждому ответу.
+
+    Реализует OWASP-рекомендованные заголовки безопасности
+    для защиты от XSS, clickjacking и MIME-sniffing атак.
+    """
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if not settings.DEBUG:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; "
+            "img-src 'self' data:; "
+            "connect-src 'self'"
+        )
+    return response
+
 
 # ──────────────────────────────────────────────
 # Middleware
@@ -135,13 +169,11 @@ app.add_middleware(
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-
 # ──────────────────────────────────────────────
 # Роутеры API v1
 # ──────────────────────────────────────────────
 from app.api.v1.router import api_router  # noqa: E402
 app.include_router(api_router, prefix="/api/v1")
-
 
 # ──────────────────────────────────────────────
 # Health Check
@@ -151,16 +183,16 @@ async def health_check() -> dict[str, str]:
     """Проверка работоспособности сервиса.
 
     Returns:
-        Словарь со статусом сервиса и версией.
+        Статус сервиса и версия.
     """
     return {"status": "ok", "service": "pulse-backend", "version": "1.1.0"}
 
 
 @app.get("/api/v1/ping", tags=["Система"])
 async def ping() -> dict[str, str]:
-    """Простая проверка доступности API.
+    """Простая проверка доступности API (без auth).
 
     Returns:
-        Ответ pong для проверки latency.
+        Ответ pong для измерения latency.
     """
     return {"message": "pong"}

@@ -18,6 +18,7 @@ from app.api.v1.routers.sync import router as sync_router
 from app.api.v1.routers.export import router as export_router
 from app.api.v1.routers.dashboards import router as dashboards_router
 from app.api.v1.routers.supply_chain import router as supply_chain_router
+from app.api.v1.routers.admin import router as admin_router
 
 api_router = APIRouter()
 
@@ -32,3 +33,4 @@ api_router.include_router(sync_router)
 api_router.include_router(export_router)
 api_router.include_router(dashboards_router)
 api_router.include_router(supply_chain_router)
+api_router.include_router(admin_router)

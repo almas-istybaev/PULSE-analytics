@@ -47,3 +47,15 @@ async def get_db():
         except Exception:
             await session.rollback()
             raise
+
+
+def get_session_factory() -> async_sessionmaker:
+    """Возвращает фабрику сессий для использования вне контекста HTTP-запроса.
+
+    Используется в APScheduler задачах, которые не имеют доступа к FastAPI
+    dependency injection.
+
+    Returns:
+        async_sessionmaker для создания AsyncSession.
+    """
+    return async_session_factory
