@@ -10,7 +10,7 @@ services:
       - DATABASE_URL=sqlite+aiosqlite:///./data/pulse.db
       - MOYSKLAD_TOKEN=${MOYSKLAD_TOKEN}
       - MOYSKLAD_WEBHOOK_SECRET=${MOYSKLAD_WEBHOOK_SECRET}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - SECRET_KEY=${SECRET_KEY}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost}
       - ENVIRONMENT=${ENVIRONMENT:-production}
       - DEBUG=false
