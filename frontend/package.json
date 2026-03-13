@@ -1,0 +1,38 @@
+{
+  "name": "pulse-frontend",
+  "version": "1.0.0",
+  "description": "Pulse — Финансово-коммерческая аналитика (frontend)",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^6.28.0",
+    "@tanstack/react-query": "^5.62.0",
+    "@tanstack/react-virtual": "^3.10.0",
+    "recharts": "^2.13.3",
+    "lucide-react": "^0.460.0",
+    "framer-motion": "^11.12.0",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.1.0",
+    "numeral": "^2.0.6"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite-plugin-pwa": "^0.21.1",
+    "vite": "^6.0.5",
+    "tailwindcss": "^4.0.0",
+    "@tailwindcss/vite": "^4.0.0",
+    "eslint": "^9.15.0",
+    "eslint-plugin-react": "^7.37.2",
+    "eslint-plugin-react-hooks": "^5.0.0",
+    "eslint-plugin-react-refresh": "^0.4.14"
+  }
+}
